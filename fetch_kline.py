@@ -18,6 +18,45 @@ import tushare as ts
 from mootdx.quotes import Quotes
 from tqdm import tqdm
 
+import threading 
+from collections import deque
+import time
+
+# --------------------------- Tushare 频率控制 ----------------------- # 
+
+class TushareRateLimiter:
+    def __init__(self, max_calls=200, time_window=60):
+        self.max_calls = max_calls
+        self.time_window = time_window
+        self.calls = deque()
+        self.lock = threading.Lock()
+
+    def wait_if_needed(self):
+        with self.lock:
+            now = time.time()
+            # 清理超过时间窗口的记录
+            while self.calls and self.calls[0] < now - self.time_window:
+                self.calls.popleft()
+            
+            # 如果达到限制，等待
+            if len(self.calls) >= self.max_calls:
+                sleep_time = self.time_window - (now - self.calls[0]) + 1
+                time.sleep(sleep_time)
+            
+                # 重新清理
+                now = time.time()
+                while self.calls and now - self.calls[0] >= self.time_window:
+                    self.calls.popleft()
+
+            # 记录本次调用
+            self.calls.append(now)
+        
+# 全局频率限制器
+tushare_limiter = TushareRateLimiter()
+
+
+
+
 warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
@@ -119,6 +158,9 @@ def _get_kline_tushare(code: str, start: str, end: str, adjust: str) -> pd.DataF
     adj_flag = None if adjust == "" else adjust
     for attempt in range(1, 4):
         try:
+            # 频率控制
+            tushare_limiter.wait_if_needed()
+            # 调用 Tushare 接口获取数据
             df = ts.pro_bar(
                 ts_code=ts_code,
                 adj=adj_flag,
@@ -303,7 +345,7 @@ def main():
 
     # ---------- Token 处理 ---------- #
     if args.datasource == "tushare":
-        ts_token = " "  # 在这里补充token
+        ts_token = "b21461531b092123eb5acaf5d326e58a0e137f109832eb0157e3d423"  # 在这里补充token
         ts.set_token(ts_token)
         global pro
         pro = ts.pro_api()

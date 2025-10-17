@@ -1,45 +1,100 @@
+from __future__ import annotations
+
 import json
-from sqlalchemy import create_engine
+from pathlib import Path
+from typing import Tuple, Dict, Any
+
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import SQLAlchemyError
 from loguru import logger
-from sqlalchemy import text
-from sqlalchemy import MetaData
-from sqlalchemy import Table, Column, Integer, String
-metadata_obj = MetaData()
-user_table = Table(
-    "user_account",
-    metadata_obj,
-    Column("id", Integer, primary_key=True),
-    Column("name", String(30)),
-    Column("fullname", String),
-)
-print(metadata_obj)
 
-username = 'huyu'
-password = 'huyu6666'
-host = 'localhost'
-port = 3306
-database_name = 'amarket'
-DATABASE_URL = f'mysql+pymysql://{username}:{password}@{host}:{port}/{database_name}'
+from .models import Base, Stock, StockData
 
-try:
+
+def _make_database_url(cfg: Dict[str, Any]) -> str:
+    t = cfg.get("type", "sqlite")
+    if t == "sqlite":
+        # expected path in cfg['path']
+        path = Path(cfg.get("path", "database/stock.db"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # sqlite absolute path
+        return f"sqlite:///{path.as_posix()}"
+    elif t == "mysql":
+        user = cfg.get("user")
+        pw = cfg.get("password")
+        host = cfg.get("host", "127.0.0.1")
+        port = cfg.get("port", 3306)
+        db = cfg.get("db")
+        if user is None or db is None:
+            raise ValueError("mysql cfg requires user and db")
+        return f"mysql+pymysql://{user}:{pw}@{host}:{port}/{db}?charset=utf8mb4"
+    else:
+        raise ValueError("unsupported db type")
+
+
+def create_engine_and_session(cfg: Dict[str, Any], echo: bool = False) -> Tuple[Any, sessionmaker]:
+    """Create SQLAlchemy engine and sessionmaker from cfg.
+
+    cfg examples:
+      {'type':'sqlite','path':'d:/Workspaces/StockTradebyZ/database/stock.db'}
+      {'type':'mysql','user':'u','password':'p','host':'127.0.0.1','port':3306,'db':'stock_db'}
+    """
+    url = _make_database_url(cfg)
+    connect_args = {}
+    if cfg.get("type") == "sqlite":
+        connect_args["check_same_thread"] = False
+
     engine = create_engine(
-        DATABASE_URL,
-        json_serializer=json.dumps,
-        json_deserializer=json.loads,
-        pool_recycle=3600,  # 每隔1小时重建连接（小于MySQL的wait_timeout）
-        pool_pre_ping=True  # 每次取连接前自动检查有效性
+        url,
+        echo=echo,
+        future=True,
+        connect_args=connect_args,
+        pool_pre_ping=True,
     )
-    # SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    with engine.connect() as conn:
-        conn.execute(text("CREATE TABLE some_table (x int, y int)"))
-        conn.execute(
-            text("INSERT INTO some_table (x, y) VALUES (:x, :y)"),
-            [{"x": 1, "y": 1}, {"x": 2, "y": 4}],
-        )
-        conn.commit()
 
-except Exception as e:
-    logger.error("数据库连接失败，请检查数据库是否启动，配置是否正确！")
-    print(e)
+    # enable foreign keys for sqlite
+    if cfg.get("type") == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            try:
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.close()
+            except Exception:
+                pass
+
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    return engine, SessionLocal
+
+
+def init_db(engine) -> None:
+    """Create tables (safe to call multiple times)."""
+    Base.metadata.create_all(engine)
+
+
+def upsert_daily_stock(session: Session, code: str, date, open_p, high_p, low_p, close_p, volume: int) -> None:
+    """Insert or update a daily stock row. Uses simple get/insert/update flow to keep portable across backends."""
+    try:
+        obj = session.get(StockData, (code, date))
+        if obj is None:
+            obj = StockData(code=code, date=date, open=open_p, high=high_p, low=low_p, close=close_p, volume=volume)
+            session.add(obj)
+        else:
+            obj.open = open_p
+            obj.high = high_p
+            obj.low = low_p
+            obj.close = close_p
+            obj.volume = volume
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"upsert_daily_stock failed: {e}")
+        raise
+
+
+def get_session_from_cfg(cfg: Dict[str, Any], echo: bool = False) -> Tuple[Any, sessionmaker]:
+    engine, SessionLocal = create_engine_and_session(cfg, echo=echo)
+    return engine, SessionLocal
+
 

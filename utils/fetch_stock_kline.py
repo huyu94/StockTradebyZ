@@ -22,7 +22,6 @@ import pandas as pd
 import tushare as ts
 from tqdm import tqdm
 
-from utils.tushare_utils import TushareRateLimiter
 from constants import BAN_PATTERNS, COOLDOWN_SECS, DEFAULT_OVERLAP_DAYS
 from errors import RateLimitError
 from sqlalchemy import text
@@ -30,6 +29,8 @@ from sqlalchemy import text
 # 导入新的数据库核心模块
 from database.core import StockCore
 from project_var import LOGGING_DIR, OUTPUT_DIR
+from utils.tushare_utils import cool_sleep, looks_like_ip_ban
+from utils.tushare_rate_limiter import TushareRateLimiter
 
 # --------------------------- Tushare 频率控制 ----------------------- # 
 # 全局频率限制器（从 utils.tushare_utils 导入）
@@ -37,15 +38,9 @@ tushare_limiter = TushareRateLimiter()
 warnings.filterwarnings("ignore")
 
 
-def _looks_like_ip_ban(exc: Exception) -> bool:
-    msg = (str(exc) or "").lower()
-    return any(pat in msg for pat in BAN_PATTERNS)
 
-def _cool_sleep(base_seconds: int) -> None:
-    jitter = random.uniform(0.9, 1.2)
-    sleep_s = max(1, int(base_seconds * jitter))
-    logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
-    time.sleep(sleep_s)
+
+
 
 # --------------------------- 历史K线（Tushare 日线，固定qfq） --------------------------- #
 pro: Optional[ts.pro_api] = None  # 模块级会话
@@ -81,7 +76,7 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
             api=pro
         )
     except Exception as e:
-        if _looks_like_ip_ban(e):
+        if looks_like_ip_ban(e):
             raise RateLimitError(str(e)) from e
         raise
 
@@ -210,9 +205,9 @@ def fetch_one_to_mysql(
             break
             
         except Exception as e:
-            if _looks_like_ip_ban(e):
+            if looks_like_ip_ban(e):
                 logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
-                _cool_sleep(COOLDOWN_SECS)
+                cool_sleep(COOLDOWN_SECS)
             else:
                 silent_seconds = 15 * attempt
                 logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")

@@ -8,8 +8,7 @@ CREATE TABLE stocks (
     exchange VARCHAR(10),
     sector VARCHAR(20),
     market_cap DECIMAL(12,2),
-    listed_date DATE,
-    PRIMARY KEY (code)
+    listed_date DATE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 创建日线数据表

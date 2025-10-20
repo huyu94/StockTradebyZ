@@ -9,7 +9,7 @@ import pandas as pd
 from pathlib import Path
 import sys
 from typing import List, Tuple, Optional, Dict, Any
-from loguru import logger
+from project_logging import logger
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import os
@@ -17,19 +17,7 @@ from functools import partial
 import time
 
 LOG_FILE = Path("find_stock.log")
-logger.remove()
-logger.add(
-    sys.stdout,
-    level="INFO",
-    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
-)
-logger.add(
-    str(LOG_FILE),
-    level="INFO",
-    rotation="10 MB",
-    encoding="utf-8",
-    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
-)
+from constants import COOLDOWN_SECS
 
 def load_single_stock_data(csv_file: Path) -> Optional[Tuple[str, pd.DataFrame]]:
     """加载单个股票数据文件"""

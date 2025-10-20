@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 
-from loguru import logger
+from project_logging import logger
 import random
 import sys
 import time
@@ -22,77 +22,24 @@ import pandas as pd
 import tushare as ts
 from tqdm import tqdm
 
-import threading 
-from collections import deque
+from utils.tushare_utils import TushareRateLimiter
+from constants import BAN_PATTERNS, COOLDOWN_SECS, DEFAULT_OVERLAP_DAYS
+from errors import RateLimitError
+from sqlalchemy import text
 
 # 导入新的数据库核心模块
 from database.core import StockCore
 from project_var import LOGGING_DIR, OUTPUT_DIR
 
 # --------------------------- Tushare 频率控制 ----------------------- # 
-
-class TushareRateLimiter:
-    def __init__(self, max_calls=200, time_window=60):
-        self.max_calls = max_calls
-        self.time_window = time_window
-        self.calls = deque()
-        self.lock = threading.Lock()
-
-    def wait_if_needed(self):
-        with self.lock:
-            now = time.time()
-            # 清理超过时间窗口的记录
-            while self.calls and self.calls[0] < now - self.time_window:
-                self.calls.popleft()
-            
-            # 如果达到限制，等待
-            if len(self.calls) >= self.max_calls:
-                sleep_time = self.time_window - (now - self.calls[0]) + 1
-                time.sleep(sleep_time)
-            
-                # 重新清理
-                now = time.time()
-                while self.calls and now - self.calls[0] >= self.time_window:
-                    self.calls.popleft()
-
-            # 记录本次调用
-            self.calls.append(now)
-
-# 全局频率限制器
+# 全局频率限制器（从 utils.tushare_utils 导入）
 tushare_limiter = TushareRateLimiter()
-
 warnings.filterwarnings("ignore")
 
-# --------------------------- 全局日志配置 --------------------------- #
-logger.remove()
-logger.add(
-    sys.stdout,
-    level="DEBUG",
-    colorize=True,
-)
-logger.add(
-    os.path.join(LOGGING_DIR, "fetch_stock_kline.log"),
-    level="DEBUG",
-    rotation="10 MB",
-    colorize=True
-)
-
-# --------------------------- 限流/封禁处理配置 --------------------------- #
-COOLDOWN_SECS = 600
-BAN_PATTERNS = (
-    "访问频繁", "请稍后", "超过频率", "频繁访问",
-    "too many requests", "429",
-    "forbidden", "403",
-    "max retries exceeded"
-)
 
 def _looks_like_ip_ban(exc: Exception) -> bool:
     msg = (str(exc) or "").lower()
     return any(pat in msg for pat in BAN_PATTERNS)
-
-class RateLimitError(RuntimeError):
-    """表示命中限流/封禁，需要长时间冷却后重试。"""
-    pass
 
 def _cool_sleep(base_seconds: int) -> None:
     jitter = random.uniform(0.9, 1.2)
@@ -124,7 +71,7 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     try:
         # 应用频率限制
         tushare_limiter.wait_if_needed()
-        
+
         df = ts.pro_bar(
             ts_code=ts_code,
             adj="qfq",
@@ -197,18 +144,44 @@ def loads_codes_from_sql(stock_core: StockCore) -> List[str]:
     codes = [x.code for x in codes]
     return codes
 
+
+def get_last_date_for_code(code: str, stock_core: StockCore):
+    """返回 stock_data 表中指定 code 的最大日期（datetime.date）或 None"""
+    sql = text("SELECT MAX(date) as last_date FROM stock_data WHERE code = :code")
+    with stock_core.engine.connect() as conn:
+        res = conn.execute(sql, {"code": str(code).zfill(6)})
+        row = res.fetchone()
+        if not row:
+            return None
+        last = row[0]
+        if last is None:
+            return None
+        # 如果是字符串，转换为 date
+        if isinstance(last, str):
+            return pd.to_datetime(last).date()
+        return last
+
 # --------------------------- 单只抓取（存储到MySQL） --------------------------- #
 def fetch_one_to_mysql(
     code: str,
     start: str,
     end: str,
     stock_core: StockCore,
+    overlap_days: int = 3,
 ):
     """抓取单只股票数据并存储到MySQL"""
     for attempt in range(1, 4):
         try:
+            # 计算起始日：从数据库取最大日期并回溯 overlap_days 天以容错
+            last_date = get_last_date_for_code(code, stock_core)
+            if last_date:
+                # last_date 是 datetime.date，start/end 为 YYYYMMDD 字符串
+                calc_start = (last_date - dt.timedelta(days=overlap_days)).strftime("%Y%m%d")
+            else:
+                calc_start = start
+
             # 获取K线数据
-            new_df = _get_kline_tushare(code, start, end)
+            new_df = _get_kline_tushare(code, calc_start, end)
             if new_df.empty:
                 logger.debug("%s 无数据，跳过。", code)
                 return
@@ -294,6 +267,20 @@ def fetch_all_klines(start, end, exclude_boards, workers, specify_stock_codes: l
 
 # --------------------------- 主入口 --------------------------- #
 def main():
+    parser = argparse.ArgumentParser(description="抓取股票日线到 MySQL 工具（utils.fetch_stock_kline）")
+    parser.add_argument("--start", default="20190101")
+    parser.add_argument("--end", default="today")
+    parser.add_argument("--stocklist", default="./stocklist.csv")
+    parser.add_argument("--exclude-boards", nargs="*", default=[], choices=["gem", "star", "bj"])
+    parser.add_argument("--create-tables", action="store_true")
+    parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR")
+    parser.add_argument("--log-file", default=None, help="可选日志文件路径")
+    args = parser.parse_args()
+
+    # initialize logging with optional overrides
+    from project_logging import init_logging
+    init_logging(stdout_level=(args.log_level or "INFO"), file_path=args.log_file)
 
     # ---------- Tushare Token ---------- #
     os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
@@ -307,12 +294,12 @@ def main():
 
     # ---------- 初始化数据库 ---------- #
     stock_core = StockCore()
-    
+
     # 测试数据库连接
     if not stock_core.test_connection():
         logger.error("数据库连接失败，请检查配置")
         sys.exit(1)
-    
+
     # 创建表（如果需要）
     if args.create_tables:
         try:
@@ -328,11 +315,12 @@ def main():
 
     # ---------- 从 stocklist.csv 读取股票池 ---------- #
     exclude_boards = set(args.exclude_boards or [])
-    codes = load_codes_from_stocklist(args.stocklist, exclude_boards)
+    codes = loads_codes_from_csv(Path(args.stocklist), exclude_boards)
 
 
 
 
+    
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from loguru import logger
+from project_logging import logger
 import random
 import sys
 import time
@@ -56,40 +56,12 @@ tushare_limiter = TushareRateLimiter()
 
 
 warnings.filterwarnings("ignore")
-
-# --------------------------- 全局日志配置 --------------------------- #
-LOG_FILE = Path("fetch.log")
-# configure loguru
-logger.remove()
-logger.add(
-    sys.stdout,
-    level="INFO",
-    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
-)
-logger.add(
-    str(LOG_FILE),
-    level="INFO",
-    rotation="10 MB",
-    encoding="utf-8",
-    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
-)
-
-# --------------------------- 限流/封禁处理配置 --------------------------- #
-COOLDOWN_SECS = 600
-BAN_PATTERNS = (
-    "访问频繁", "请稍后", "超过频率", "频繁访问",
-    "too many requests", "429",
-    "forbidden", "403",
-    "max retries exceeded"
-)
+from constants import BAN_PATTERNS, COOLDOWN_SECS
+from errors import RateLimitError
 
 def _looks_like_ip_ban(exc: Exception) -> bool:
     msg = (str(exc) or "").lower()
     return any(pat in msg for pat in BAN_PATTERNS)
-
-class RateLimitError(RuntimeError):
-    """表示命中限流/封禁，需要长时间冷却后重试。"""
-    pass
 
 def _cool_sleep(base_seconds: int) -> None:
     jitter = random.uniform(0.9, 1.2)

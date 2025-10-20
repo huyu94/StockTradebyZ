@@ -3,24 +3,27 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import logging
+from loguru import logger
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 
-# ---------- 日志 ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        # 将日志写入文件
-        logging.FileHandler("select_results.log", encoding="utf-8"),
-    ],
+LOG_FILE = Path("select_results.log")
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {message}",
 )
-logger = logging.getLogger("select")
+logger.add(
+    str(LOG_FILE),
+    level="INFO",
+    encoding="utf-8",
+    rotation="10 MB",
+    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {message}",
+)
 
 
 # ---------- 工具 ----------

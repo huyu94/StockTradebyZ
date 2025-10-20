@@ -1,8 +1,9 @@
 from typing import Type, TypeVar, Generic, Optional, List, Dict, Any, Sequence
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from loguru import logger
+import pandas as pd
 
 from database.models import Base, Stock, StockData, StockMinData
 
@@ -22,6 +23,9 @@ class Repository(Generic[ModelT]):
     def __init__(self, model: Type[ModelT], session: Session):
         self.model = model
         self.session = session
+
+    def all(self) -> List[ModelT]:
+        return self.session.query(self.model).all()
 
     def get(self, pk) -> Optional[ModelT]:
         """Get by primary key. pk may be a scalar or a tuple for composite PKs."""
@@ -127,6 +131,62 @@ class StockDataRepository(Repository[StockData]):
 
     def upsert_daily(self, values: Dict[str, Any], commit: bool = True) -> StockData:
         return self.upsert_from_dict(values, commit=commit)
+
+    def bulk_upsert_from_df(self, df: pd.DataFrame, unit: str = 'share', batch_size: int = 1000) -> None:
+        """
+        批量将 DataFrame 的日线数据 upsert 到 stock_data 表。
+
+        df: 必须包含 columns: code, date, open, high, low, close, volume
+        unit: 'share' 表示 volume 为股；'hand' 表示 volume 为手(1 手 = 100 股)
+        batch_size: 每次执行的批量大小
+        """
+        required = {'code', 'date', 'open', 'high', 'low', 'close', 'volume'}
+        if not required.issubset(set(df.columns)):
+            raise ValueError(f"DataFrame must contain columns: {required}")
+
+        factor = 1 if unit == 'share' else 100
+
+        df2 = df.copy()
+        df2['date'] = pd.to_datetime(df2['date']).dt.date
+        df2['volume'] = (df2['volume'].astype('int64') * factor).astype('int64')
+
+        insert_sql = text(
+            """
+            INSERT INTO stock_data (code, date, open, high, low, close, volume)
+            VALUES (:code, :date, :open, :high, :low, :close, :volume)
+            ON DUPLICATE KEY UPDATE
+                `open` = VALUES(`open`),
+                `high` = VALUES(`high`),
+                `low`  = VALUES(`low`),
+                `close`= VALUES(`close`),
+                `volume` = VALUES(`volume`)
+            """
+        )
+
+        rows = [
+            {
+                'code': str(r['code']).zfill(6),
+                'date': r['date'].isoformat(),
+                'open': None if pd.isna(r['open']) else float(r['open']),
+                'high': None if pd.isna(r['high']) else float(r['high']),
+                'low': None if pd.isna(r['low']) else float(r['low']),
+                'close': None if pd.isna(r['close']) else float(r['close']),
+                'volume': None if pd.isna(r['volume']) else int(r['volume']),
+            }
+            for _, r in df2.iterrows()
+        ]
+
+        # use session's connection for executes
+        try:
+            total = len(rows)
+            for i in range(0, total, batch_size):
+                batch = rows[i : i + batch_size]
+                self.session.execute(insert_sql, batch)
+                self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+            logger.exception("bulk_upsert_from_df failed; rolled back")
+            raise
 
 
 class StockMinDataRepository(Repository[StockMinData]):

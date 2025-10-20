@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import logging
+from loguru import logger
 import random
 import sys
 import time
@@ -59,15 +59,20 @@ warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
 LOG_FILE = Path("fetch.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
-    ],
+# configure loguru
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
 )
-logger = logging.getLogger("fetch_from_stocklist")
+logger.add(
+    str(LOG_FILE),
+    level="INFO",
+    rotation="10 MB",
+    encoding="utf-8",
+    format="{time:YYYY-MM-DD HH:mm:ss} [{level}] {file.name}:{line} {message}",
+)
 
 # --------------------------- 限流/封禁处理配置 --------------------------- #
 COOLDOWN_SECS = 600

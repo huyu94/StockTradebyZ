@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import logging
+
+from loguru import logger
 import random
 import sys
 import time
@@ -26,6 +27,7 @@ from collections import deque
 
 # 导入新的数据库核心模块
 from database.core import StockCore
+from project_var import LOGGING_DIR, OUTPUT_DIR
 
 # --------------------------- Tushare 频率控制 ----------------------- # 
 
@@ -62,16 +64,18 @@ tushare_limiter = TushareRateLimiter()
 warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
-LOG_FILE = Path("fetch_mysql.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
-    ],
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="DEBUG",
+    colorize=True,
 )
-logger = logging.getLogger("fetch_to_mysql")
+logger.add(
+    os.path.join(LOGGING_DIR, "fetch_stock_kline.log"),
+    level="DEBUG",
+    rotation="10 MB",
+    colorize=True
+)
 
 # --------------------------- 限流/封禁处理配置 --------------------------- #
 COOLDOWN_SECS = 600
@@ -115,6 +119,7 @@ def _to_ts_code(code: str) -> str:
         return f"{code}.SZ"
 
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
+    """从tushare获取单只股票的K线数据"""
     ts_code = _to_ts_code(code)
     try:
         # 应用频率限制
@@ -176,7 +181,8 @@ def _filter_by_boards_stocklist(df: pd.DataFrame, exclude_boards: set[str]) -> p
 
     return df[mask].copy()
 
-def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> List[str]:
+def loads_codes_from_csv(stocklist_csv: Path, exclude_boards: set[str]) -> List[str]:
+    """从 stocklist.csv 中获取股票代码列表"""
     df = pd.read_csv(stocklist_csv)    
     df = _filter_by_boards_stocklist(df, exclude_boards)
     codes = df["symbol"].astype(str).str.zfill(6).tolist()
@@ -185,16 +191,20 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> 
                 stocklist_csv, len(codes), ",".join(sorted(exclude_boards)) or "无")
     return codes
 
+def loads_codes_from_sql(stock_core: StockCore) -> List[str]:
+    """从数据库中获取股票基本信息列表"""
+    codes = stock_core.stock.get_all_codes()
+    codes = [x.code for x in codes]
+    return codes
+
 # --------------------------- 单只抓取（存储到MySQL） --------------------------- #
 def fetch_one_to_mysql(
     code: str,
     start: str,
     end: str,
     stock_core: StockCore,
-    create_stock_info: bool = True
 ):
     """抓取单只股票数据并存储到MySQL"""
-    
     for attempt in range(1, 4):
         try:
             # 获取K线数据
@@ -206,22 +216,7 @@ def fetch_one_to_mysql(
             new_df = validate(new_df)
             
             # 确保股票基础信息存在
-            if create_stock_info:
-                existing_stock = stock_core.stock.get_by_code(code)
-                if not existing_stock:
-                    try:
-                        # 创建基础股票信息
-                        ts_code = _to_ts_code(code)
-                        exchange = "SH" if ts_code.endswith(".SH") else "SZ" if ts_code.endswith(".SZ") else "BJ"
-                        
-                        stock_core.stock.create(
-                            code=code,
-                            name=f"股票{code}",  # 默认名称，可后续更新
-                            exchange=exchange
-                        )
-                        logger.debug(f"创建股票基础信息: {code}")
-                    except Exception as e:
-                        logger.warning(f"创建股票基础信息失败 {code}: {e}")
+            check_stock_info_exist(code, stock_core)
             
             # 准备数据用于批量插入
             data_list = []
@@ -238,7 +233,7 @@ def fetch_one_to_mysql(
             
             # 批量插入/更新到数据库
             count = stock_core.stock_data.bulk_upsert(data_list)
-            logger.info(f"✓ {code} 数据入库完成，共 {count} 条记录")
+            # logger.info(f"✓ {code} 数据入库完成，共 {count} 条记录")
             break
             
         except Exception as e:
@@ -252,27 +247,53 @@ def fetch_one_to_mysql(
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)
 
+def check_stock_info_exist(code: str, stock_core: StockCore):
+    """检查数据库里是不是有这只股票的基本信息"""
+    existing_stock = stock_core.stock.get_by_code(code)
+    if not existing_stock:
+        raise ValueError(f"数据库里找不到对应的股票基本信息，code:{code}")
+
+def fetch_all_klines(start, end, exclude_boards, workers, specify_stock_codes: list=[]):
+    """获取所有股票数据"""
+    stock_core = StockCore()
+    # 1. 获取codes 
+    codes = []
+    if specify_stock_codes:
+        codes = specify_stock_codes
+    else:
+        codes = loads_codes_from_sql(stock_core)
+    if not codes:
+        logger.error("stocklist 为空或被过滤后无代码，请检查。")
+        return 
+
+    logger.info(
+        f"开始抓取{len(codes)}支股票到MySQL | 数据源:Tushare(日线,qfq) | "
+        f"日期:{start} → {end} | 排除:{','.join(sorted(exclude_boards)) or '无'} | "
+        f"抓取线程数:{workers}"
+    )
+
+
+    # 2. 根据codes异步下载股票K线数据
+    # ---------- 多线程抓取到MySQL ---------- #
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                fetch_one_to_mysql,
+                code,
+                start,
+                end,
+                stock_core,
+            )
+            for code in codes
+        ]
+        for _ in tqdm(as_completed(futures), total=len(futures), desc="下载进度"):
+            pass
+
+    logger.info("全部任务完成，数据已存储到MySQL数据库")
+
+
 # --------------------------- 主入口 --------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线存储到MySQL（固定qfq）")
-    # 抓取范围
-    parser.add_argument("--start", default="20190101", help="起始日期 YYYYMMDD 或 'today'")
-    parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")
-    # 股票清单与板块过滤
-    parser.add_argument("--stocklist", type=Path, default=Path("./stocklist.csv"), help="股票清单CSV路径（需含 ts_code 或 symbol）")
-    parser.add_argument(
-        "--exclude-boards",
-        nargs="*",
-        default=[],
-        choices=["gem", "star", "bj"],
-        help="排除板块，可多选：gem(创业板300/301) star(科创板688) bj(北交所.BJ/4/8)"
-    )
-    # 数据库相关
-    parser.add_argument("--create-tables", action="store_true", help="自动创建数据表")
-    parser.add_argument("--create-stock-info", action="store_true", default=True, help="自动创建股票基础信息")
-    # 其它
-    parser.add_argument("--workers", type=int, default=6, help="并发线程数")
-    args = parser.parse_args()
 
     # ---------- Tushare Token ---------- #
     os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
@@ -309,32 +330,15 @@ def main():
     exclude_boards = set(args.exclude_boards or [])
     codes = load_codes_from_stocklist(args.stocklist, exclude_boards)
 
-    if not codes:
-        logger.error("stocklist 为空或被过滤后无代码，请检查。")
-        sys.exit(1)
 
-    logger.info(
-        "开始抓取 %d 支股票到MySQL | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 排除:%s",
-        len(codes), start, end, ",".join(sorted(exclude_boards)) or "无",
-    )
 
-    # ---------- 多线程抓取到MySQL ---------- #
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [
-            executor.submit(
-                fetch_one_to_mysql,
-                code,
-                start,
-                end,
-                stock_core,
-                args.create_stock_info
-            )
-            for code in codes
-        ]
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="下载进度"):
-            pass
 
-    logger.info("全部任务完成，数据已存储到MySQL数据库")
+
 
 if __name__ == "__main__":
-    main()
+    fetch_all_klines(start='20250901',
+                     end='20251020',
+                     workers=8,
+                     exclude_boards=[],
+                     specify_stock_codes=[],
+                     )

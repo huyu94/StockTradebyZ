@@ -30,7 +30,7 @@ class StockFacade:
         finally:
             session.close()
     
-    def get_all_codes(self,) -> List[models.Stock]:
+    def get_all(self,) -> List[models.Stock]:
         session = SessionLocal()
         try:
             repo = StockRepository(session)
@@ -43,6 +43,15 @@ class StockFacade:
         try:
             repo = StockRepository(session)
             obj = repo.add(models.Stock(**values), commit=True)
+            return obj
+        finally:
+            session.close()
+
+    def update(self, **values) -> Any:
+        session = SessionLocal()
+        try:
+            repo = StockRepository(session)
+            obj = repo.upsert_from_dict(values)
             return obj
         finally:
             session.close()

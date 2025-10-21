@@ -124,9 +124,9 @@ class StockDataRepository(Repository[StockData]):
     def __init__(self, session: Session):
         super().__init__(StockData, session)
 
-    def get_max_update_date(self) -> Optional[Any]:
+    def get_max_update_date(self, code: str) -> Optional[Any]:
         """获取 stock_data 表中的最大日期值。"""
-        stmt = select(func.max(self.model.date))
+        stmt = select(func.max(self.model.date)).where(self.model.code == code)
         return self.session.execute(stmt).scalar()
 
     def get_by_date(self, the_date) -> List[StockData]:

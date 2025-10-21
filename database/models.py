@@ -22,7 +22,7 @@ class Stock(Base):
     delist_date = Column(Date)  # 退市日期（若已退市）
     act_name = Column(String(64))  # 实际控制人名称
     act_ent_type = Column(String(64))  # 实控人企业性质
-    last_update_date = Column(Date, nullable=True)  # 最近入库的日线日期（便于增量更新）
+    last_updated_date = Column(Date)  # 最近入库的日线日期（便于增量更新）
 
 
 class StockData(Base):

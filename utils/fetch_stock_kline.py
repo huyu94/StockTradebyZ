@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 
 from project_logging import logger
@@ -19,7 +18,7 @@ from typing import List, Optional
 import os
 
 import pandas as pd
-import tushare as ts
+import tushare as ts, 
 from tqdm import tqdm
 
 from constants import BAN_PATTERNS, COOLDOWN_SECS, DEFAULT_OVERLAP_DAYS
@@ -31,6 +30,7 @@ from database.core import StockCore
 from project_var import LOGGING_DIR, OUTPUT_DIR
 from utils.tushare_utils import cool_sleep, looks_like_ip_ban
 from utils.tushare_rate_limiter import TushareRateLimiter
+from utils.tushare_api import init_tushare_api
 
 # --------------------------- Tushare 频率控制 ----------------------- # 
 # 全局频率限制器（从 utils.tushare_utils 导入）
@@ -50,15 +50,7 @@ def set_api(session) -> None:
     global pro
     pro = session
     
-def _to_ts_code(code: str) -> str:
-    """把6位code映射到标准 ts_code 后缀。"""
-    code = str(code).zfill(6)
-    if code.startswith(("60", "68", "9")):
-        return f"{code}.SH"
-    elif code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    else:
-        return f"{code}.SZ"
+
 
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     """从tushare获取单只股票的K线数据"""
@@ -140,40 +132,25 @@ def loads_codes_from_sql(stock_core: StockCore) -> List[str]:
     return codes
 
 
-def get_last_date_for_code(code: str, stock_core: StockCore):
-    """返回 stock_data 表中指定 code 的最大日期（datetime.date）或 None"""
-    sql = text("SELECT MAX(date) as last_date FROM stock_data WHERE code = :code")
-    with stock_core.engine.connect() as conn:
-        res = conn.execute(sql, {"code": str(code).zfill(6)})
-        row = res.fetchone()
-        if not row:
-            return None
-        last = row[0]
-        if last is None:
-            return None
-        # 如果是字符串，转换为 date
-        if isinstance(last, str):
-            return pd.to_datetime(last).date()
-        return last
 
-# --------------------------- 单只抓取（存储到MySQL） --------------------------- #
-def fetch_one_to_mysql(
+
+def fetch_kline(
     code: str,
     start: str,
     end: str,
+    pro,
     stock_core: StockCore,
-    overlap_days: int = 3,
 ):
-    """抓取单只股票数据并存储到MySQL"""
+    """
+    @brief: 抓取单只股票数据并存储到MySQL
+    @param: code: 股票代码（6位字符串）
+    @param: start: 抓取起始日期（YYYY-MM-DD字符串）
+    @param: end: 抓取结束日期（YYYY-MM-DD字符串）
+    @param: pro: tushare pro_api 会话
+    @param: stock_core: 数据库核心对象
+    """
     for attempt in range(1, 4):
         try:
-            # 计算起始日：从数据库取最大日期并回溯 overlap_days 天以容错
-            last_date = get_last_date_for_code(code, stock_core)
-            if last_date:
-                # last_date 是 datetime.date，start/end 为 YYYYMMDD 字符串
-                calc_start = (last_date - dt.timedelta(days=overlap_days)).strftime("%Y%m%d")
-            else:
-                calc_start = start
 
             # 获取K线数据
             new_df = _get_kline_tushare(code, calc_start, end)
@@ -221,8 +198,14 @@ def check_stock_info_exist(code: str, stock_core: StockCore):
     if not existing_stock:
         raise ValueError(f"数据库里找不到对应的股票基本信息，code:{code}")
 
-def fetch_all_klines(start, end, exclude_boards, workers, specify_stock_codes: list=[]):
+def fetch_klines_async(start, end, exclude_boards, workers, specify_stock_codes: list=[]):
     """获取所有股票数据"""
+    input = [{
+        'code': '',
+        'start': '',
+        'end': '',
+    },]
+
     stock_core = StockCore()
     # 1. 获取codes 
     codes = []
@@ -260,43 +243,47 @@ def fetch_all_klines(start, end, exclude_boards, workers, specify_stock_codes: l
     logger.info("全部任务完成，数据已存储到MySQL数据库")
 
 
+
+def update_all_stock_klines(pro, stock_core: StockCore,):
+    """更新所有股票K线数据到最新"""
+    today_str = dt.date.today().strftime("%Y%m%d")
+    fetch_all_klines(
+        start="20190101",
+        end=today_str,
+        exclude_boards=set(),
+        workers=8,
+        specify_stock_codes=[],
+    )
+
+        exclude_boards=set(),
+        workers=8,
+        specify_stock_codes=[],
+    )
+
 # --------------------------- 主入口 --------------------------- #
-def main():
-    parser = argparse.ArgumentParser(description="抓取股票日线到 MySQL 工具（utils.fetch_stock_kline）")
-    parser.add_argument("--start", default="20190101")
-    parser.add_argument("--end", default="today")
-    parser.add_argument("--stocklist", default="./stocklist.csv")
-    parser.add_argument("--exclude-boards", nargs="*", default=[], choices=["gem", "star", "bj"])
-    parser.add_argument("--create-tables", action="store_true")
-    parser.add_argument("--workers", type=int, default=6)
-    parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR")
-    parser.add_argument("--log-file", default=None, help="可选日志文件路径")
-    args = parser.parse_args()
-
-    # initialize logging with optional overrides
-    from project_logging import init_logging
-    init_logging(stdout_level=(args.log_level or "INFO"), file_path=args.log_file)
-
-    # ---------- Tushare Token ---------- #
-    os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
-    os.environ["no_proxy"] = os.environ["NO_PROXY"]
-    ts_token = os.environ.get("TUSHARE_TOKEN")
-    if not ts_token:
-        raise ValueError("请先设置环境变量 TUSHARE_TOKEN，例如：export TUSHARE_TOKEN=你的token")
-    ts.set_token(ts_token)
-    global pro
-    pro = ts.pro_api()
+def main(
+    start: str = "20190101",
+    end: str = "today",
+    stocklist: str = "./stocklist.csv",
+    exclude_boards: Optional[list] = None,
+    create_tables: bool = False,
+    workers: int = 6,
+    log_level: Optional[str] = None,
+    log_file: Optional[str] = None,
+    specify_stock_codes: Optional[list] = None,
+):
+    # ---------- 初始化 Tushare API ---------- #
+    pro = init_tushare_api()
 
     # ---------- 初始化数据库 ---------- #
     stock_core = StockCore()
-
     # 测试数据库连接
     if not stock_core.test_connection():
         logger.error("数据库连接失败，请检查配置")
         sys.exit(1)
 
     # 创建表（如果需要）
-    if args.create_tables:
+    if create_tables:
         try:
             stock_core.create_tables()
             logger.info("数据表创建成功")
@@ -304,13 +291,21 @@ def main():
             logger.error(f"数据表创建失败: {e}")
             sys.exit(1)
 
+    today = dt.date.today().strftime("%Y-%m-%d")
+    
+
+    # 获取所有codes
+    codes = []
+
+
+
     # ---------- 日期解析 ---------- #
-    start = dt.date.today().strftime("%Y%m%d") if str(args.start).lower() == "today" else args.start
-    end = dt.date.today().strftime("%Y%m%d") if str(args.end).lower() == "today" else args.end
+    start = dt.date.today().strftime("%Y%m%d") if str(start).lower() == "today" else start
+    end = dt.date.today().strftime("%Y%m%d") if str(end).lower() == "today" else end
 
     # ---------- 从 stocklist.csv 读取股票池 ---------- #
-    exclude_boards = set(args.exclude_boards or [])
-    codes = loads_codes_from_csv(Path(args.stocklist), exclude_boards)
+    exclude_boards = set(exclude_boards or [])
+    codes = loads_codes_from_csv(Path(stocklist), exclude_boards)
 
 
 
@@ -319,9 +314,11 @@ def main():
 
 
 if __name__ == "__main__":
-    fetch_all_klines(start='20250901',
-                     end='20251020',
-                     workers=8,
-                     exclude_boards=[],
-                     specify_stock_codes=[],
-                     )
+    # 默认入口：直接在这里修改参数即可
+    main(
+        start='20250901',
+        end='20251020',
+        workers=8,
+        exclude_boards=[],
+        specify_stock_codes=[],
+    )

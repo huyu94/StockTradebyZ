@@ -22,6 +22,7 @@ class Stock(Base):
     delist_date = Column(Date)  # 退市日期（若已退市）
     act_name = Column(String(64))  # 实际控制人名称
     act_ent_type = Column(String(64))  # 实控人企业性质
+    last_update_date = Column(Date, nullable=True)  # 最近入库的日线日期（便于增量更新）
 
 
 class StockData(Base):
@@ -32,8 +33,10 @@ class StockData(Base):
     high = Column(DECIMAL(10, 2))  # 当日最高价
     low = Column(DECIMAL(10, 2))  # 当日最低价
     close = Column(DECIMAL(10, 2))  # 当日收盘价
+    pre_close = Column(DECIMAL(10, 2))  # 昨日收盘价
+    change = Column(DECIMAL(10, 2))  # 涨跌额
     volume = Column(Integer)  # 成交量，整数。注意数据源单位可能为“手”或“股”，需在写入时统一说明/转换
-    market_cap = Column(Integer) # 市值，整数，单位为元（或按项目约定）
+    amount = Column(DECIMAL(10, 2))  # 成交额，保留两位小数
     stock = relationship("Stock", backref="daily_data")  # ORM 关系，方便通过 Stock 访问其日线数据
 
 

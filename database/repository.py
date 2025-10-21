@@ -1,6 +1,6 @@
 from typing import Type, TypeVar, Generic, Optional, List, Dict, Any, Sequence
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select, text, func
 from sqlalchemy.exc import SQLAlchemyError
 from loguru import logger
 import pandas as pd
@@ -124,10 +124,25 @@ class StockDataRepository(Repository[StockData]):
     def __init__(self, session: Session):
         super().__init__(StockData, session)
 
+    def get_max_update_date(self) -> Optional[Any]:
+        """获取 stock_data 表中的最大日期值。"""
+        stmt = select(func.max(self.model.date))
+        return self.session.execute(stmt).scalar()
+
     def get_by_date(self, the_date) -> List[StockData]:
         stmt = select(self.model).where(self.model.date == the_date)
         res = self.session.execute(stmt).scalars().all()
         return res
+
+    def get_by_code_and_date(self, code: str, the_date) -> Optional[StockData]:
+        """Return a single StockData row for given code and date, or None if not found.
+
+        code: stock code like '000001' or integer-like; function will zfill to 6 chars.
+        the_date: a date object or ISO date string accepted by DB comparison.
+        """
+        code = str(code).zfill(6)
+        stmt = select(self.model).where(self.model.code == code).where(self.model.date == the_date)
+        return self.session.execute(stmt).scalars().one_or_none()
 
     def upsert_daily(self, values: Dict[str, Any], commit: bool = True) -> StockData:
         return self.upsert_from_dict(values, commit=commit)

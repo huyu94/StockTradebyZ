@@ -37,7 +37,7 @@ class StockData(Base):
     change = Column(DECIMAL(10, 2))  # 涨跌额
     volume = Column(Integer)  # 成交量，整数。注意数据源单位可能为“手”或“股”，需在写入时统一说明/转换
     amount = Column(DECIMAL(10, 2))  # 成交额，保留两位小数
-    stock = relationship("Stock", backref="daily_data")  # ORM 关系，方便通过 Stock 访问其日线数据
+    stock = relationship("Stock", backref="daily_data", lazy="noload")  # ORM 关系，方便通过 Stock 访问其日线数据
 
 
 class StockMinData(Base):
@@ -48,7 +48,7 @@ class StockMinData(Base):
     volume = Column(Integer)  # 该时间点/周期的成交量（整数）
     direction = Column(String(10))  # 成交方向，可为 'BUY'/'SELL' 或其他约定值
 
-    stock = relationship("Stock", backref="min_data")  # ORM 关系，方便通过 Stock 访问分钟/逐笔数据
+    stock = relationship("Stock", backref="min_data", lazy="noload")  # ORM 关系，方便通过 Stock 访问分钟/逐笔数据
 
 
 Index("ix_stock_data_date", StockData.date)

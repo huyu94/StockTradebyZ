@@ -50,6 +50,24 @@ class TushareAPI:
         # 返回按 ts_code, trade_date 排序（trade_date 已是 date 类型）
         return df.sort_values(by=["ts_code", "trade_date"]).reset_index(drop=True)
 
+    def get_trade_calendar(self, 
+                           start: str, 
+                           end: str,
+                           exchange: str = "", 
+                           is_open: bool = True) -> pd.DataFrame:
+        """获取交易日历"""
+        if self.pro is None:
+            raise RuntimeError("Tushare API 未初始化，请先调用 init() 方法")
+
+        df = self.pro.trade_cal(
+            exchange=exchange or "",
+            start_date=start,
+            end_date=end,
+            is_open=1 if is_open else 0,
+        )
+
+        return df
+
     @staticmethod
     def _to_ts_code(code: str) -> str:
         """把6位code映射到标准 ts_code 后缀。"""
@@ -61,9 +79,8 @@ class TushareAPI:
         else:
             return f"{code}.SZ"
 
-
     @staticmethod
-    def validate(df: pd.DataFrame) -> pd.DataFrame:
+    def _validate_kline(df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             raise ValueError("数据为空！")
         # ensure trade_date is a date object (handles strings like '20220104')
@@ -85,5 +102,7 @@ class TushareAPI:
 if __name__ == "__main__":
 
     tushare_api = TushareAPI()
-    df = tushare_api.get_kline("000001", "2022-01-01", "2022-12-31")
+    # df = tushare_api.get_kline("000001", "2022-01-01", "2022-12-31")
+    # df = tushare_api.get_trade_calendar("20180101", "20251021", is_open=True)
+    # df.to_csv("trade_calendar.csv", index=False)
     print(df)

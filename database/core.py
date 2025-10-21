@@ -120,6 +120,32 @@ class StockDataFacade:
             return repo.get_by_code_and_date(code, the_date)
         finally:
             session.close()
+    
+    def get_stock_klines(self, code: str, start: str, end: str) -> List[models.StockData]:
+        """Return list of StockData rows for code between start and end dates."""
+        session = SessionLocal()
+        try:
+            repo = StockDataRepository(session)
+            stmt = select(repo.model).where(
+                (repo.model.code == code) &
+                (repo.model.date >= start) &
+                (repo.model.date <= end)
+            ).order_by(repo.model.date)
+            results = session.execute(stmt).scalars().all()
+            return results
+        finally:
+            session.close()
+
+    def get_stock_dates(self, code: str) -> List[Any]:
+        """Return list of dates (as date objects) for which stock_data exists for given code."""
+        session = SessionLocal()
+        try:
+            repo = StockDataRepository(session)
+            stmt = select(repo.model.date).where(repo.model.code == code).order_by(repo.model.date)
+            results = session.execute(stmt).scalars().all()
+            return results
+        finally:
+            session.close()
 
 
 class StockCore:
